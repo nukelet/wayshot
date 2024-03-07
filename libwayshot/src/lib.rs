@@ -49,10 +49,9 @@ use wayland_protocols_wlr::{
 };
 
 use crate::{
-    convert::create_converter,
     dispatch::{CaptureFrameState, FrameState, OutputCaptureState, WayshotState},
     output::OutputInfo,
-    region::{LogicalRegion, Region, Size},
+    region::{LogicalRegion, Size},
     screencopy::{create_shm_fd, FrameCopy, FrameFormat},
 };
 
@@ -355,15 +354,7 @@ impl WayshotConnection {
             capture_region,
         )?;
 
-        let mut frame_mmap = unsafe { MmapMut::map_mut(&mem_file)? };
-        let data = &mut *frame_mmap;
-        let frame_color_type = if let Some(converter) = create_converter(frame_format.format) {
-            converter.convert_inplace(data)
-        } else {
-            tracing::error!("Unsupported buffer format: {:?}", frame_format.format);
-            tracing::error!("You can send a feature request for the above format to the mailing list for wayshot over at https://sr.ht/~shinyzenith/wayshot.");
-            return Err(Error::NoSupportedBufferFormat);
-        };
+        let frame_mmap = unsafe { MmapMut::map_mut(&mem_file)? };
         let rotated_physical_size = match output_info.transform {
             Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270 => {
                 Size {
@@ -375,7 +366,6 @@ impl WayshotConnection {
         };
         let frame_copy = FrameCopy {
             frame_format,
-            frame_color_type,
             frame_mmap,
             transform: output_info.transform,
             logical_region: capture_region
@@ -595,7 +585,7 @@ impl WayshotConnection {
                     |composite_image: Option<Result<_>>, image: Result<_>| {
                         // Default to a transparent image.
                         let composite_image = composite_image.unwrap_or_else(|| {
-                            Ok(DynamicImage::new_rgba8(
+                            Ok(DynamicImage::new_rgba16(
                                 (capture_region.inner.size.width as f64 * max_scale) as u32,
                                 (capture_region.inner.size.height as f64 * max_scale) as u32,
                             ))

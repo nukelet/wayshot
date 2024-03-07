@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use image::{ColorType, DynamicImage, ImageBuffer, Pixel};
+use image::{DynamicImage, ImageBuffer};
 use memmap2::MmapMut;
 use nix::{
     fcntl,
@@ -16,6 +16,12 @@ use wayland_client::protocol::{
 };
 
 use crate::{
+    convert::{
+        bgr888_to_rgb8,
+        abgr8888_to_rgba8,
+        argb8888_to_rgba8,
+        abgr2101010_to_rgba16
+    },
     region::{LogicalRegion, Size},
     Error, Result,
 };
@@ -53,29 +59,11 @@ impl FrameFormat {
     }
 }
 
-#[tracing::instrument(skip(frame_mmap))]
-fn create_image_buffer<P>(
-    frame_format: &FrameFormat,
-    frame_mmap: &MmapMut,
-) -> Result<ImageBuffer<P, Vec<P::Subpixel>>>
-where
-    P: Pixel<Subpixel = u8>,
-{
-    tracing::debug!("Creating image buffer");
-    ImageBuffer::from_vec(
-        frame_format.size.width,
-        frame_format.size.height,
-        frame_mmap.to_vec(),
-    )
-    .ok_or(Error::BufferTooSmall)
-}
-
 /// The copied frame comprising of the FrameFormat, ColorType (Rgba8), and a memory backed shm
 /// file that holds the image data in it.
 #[derive(Debug)]
 pub struct FrameCopy {
     pub frame_format: FrameFormat,
-    pub frame_color_type: ColorType,
     pub frame_mmap: MmapMut,
     pub transform: wl_output::Transform,
     /// Logical region with the transform already applied.
@@ -87,15 +75,41 @@ impl TryFrom<&FrameCopy> for DynamicImage {
     type Error = Error;
 
     fn try_from(value: &FrameCopy) -> Result<Self> {
-        Ok(match value.frame_color_type {
-            ColorType::Rgb8 => {
-                Self::ImageRgb8(create_image_buffer(&value.frame_format, &value.frame_mmap)?)
+        let format = value.frame_format.format;
+        let width = value.frame_format.size.width;
+        let height = value.frame_format.size.height;
+        let data = &value.frame_mmap;
+        match format {
+            Format::Bgr888 => {
+                let buf = bgr888_to_rgb8(data);
+                let imgbuf = ImageBuffer::from_vec(width, height, buf)
+                    .ok_or(Error::BufferTooSmall)?;
+                Ok(Self::ImageRgb8(imgbuf))
             }
-            ColorType::Rgba8 => {
-                Self::ImageRgba8(create_image_buffer(&value.frame_format, &value.frame_mmap)?)
+            Format::Xbgr8888 | Format::Abgr8888 => {
+                let buf = abgr8888_to_rgba8(data);
+                let imgbuf = ImageBuffer::from_vec(width, height, buf)
+                    .ok_or(Error::BufferTooSmall)?;
+                Ok(Self::ImageRgba8(imgbuf))
             }
-            _ => return Err(Error::InvalidColor),
-        })
+            Format::Xrgb8888 | Format::Argb8888 => {
+                let buf = argb8888_to_rgba8(data);
+                let imgbuf = ImageBuffer::from_vec(width, height, buf)
+                    .ok_or(Error::BufferTooSmall)?;
+                Ok(Self::ImageRgba8(imgbuf))
+            }
+            Format::Xbgr2101010 | Format::Abgr2101010 => {
+                let buf = abgr2101010_to_rgba16(data);
+                let imgbuf = ImageBuffer::from_vec(width, height, buf)
+                    .ok_or(Error::BufferTooSmall)?;
+                Ok(Self::ImageRgba16(imgbuf))
+            }
+            _ => {
+                tracing::error!("Unsupported buffer format: {:?}", format);
+                tracing::error!("You can send a feature request for the above format to the mailing list for wayshot over at https://sr.ht/~shinyzenith/wayshot.");
+                Err(Error::NoSupportedBufferFormat)
+            },
+        }
     }
 }
 
